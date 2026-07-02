@@ -46,6 +46,23 @@ ai-bathy/
 
 ---
 
+## ⚡ One-Click Helper Tool (`one_click.exe` / `one_click.py`)
+
+An interactive helper utility is provided at the root folder to simplify execution:
+* **Run Local Pipeline:** Prompts you for input raster, boundary, and output files, then executes the local Python script.
+* **Upload and Open Kaggle Notebook:** Programmatically compiles the TPU-optimized code into a Jupyter Notebook (`.ipynb`), configures the kernel metadata (accelerator: TPU, internet: enabled), uploads it to your Kaggle account via the Kaggle API, and automatically opens the notebook in your web browser.
+
+**To use it:**
+* On Windows, simply double-click **`one_click.exe`** at the root of the repository.
+* Or run it via command line:
+  ```bash
+  python one_click.py
+  ```
+
+*Note: Pushing to Kaggle requires the `kaggle` package (`pip install kaggle`) and your Kaggle API key file `kaggle.json` placed in `~/.kaggle/`.*
+
+---
+
 ## 💻 1. Local Native Version (CPU / Single GPU)
 
 ### 🛠️ Installation
