@@ -11,6 +11,21 @@ Changes vs the single-GPU version:
      MXUs are built for bf16 matmul/conv throughput.
   4. DDIM sampling loop reads alpha_bar from host-side NumPy instead of
      doing a device->host sync every step.
+
+FIXES applied in this revision (see inline "FIX:" comments):
+  A. Exported .asc now writes the CALIBRATED depth grid. Previously the
+     file was written *before* the calibration factor was computed/applied,
+     so the saved grid silently disagreed with the reported volume.
+  B. Chunked training loss now reports the mean over the chunk instead of
+     the last (single, noisy) scan step, so printed trends are meaningful.
+  C. Shoreline blur is now mask-normalized so water pixels near the
+     boundary can't pick up unmasked decoder content from outside the mask.
+  D. logvar is clamped before exp() to guard against numerical blowups.
+  E. Optional SD-style latent rescaling (USE_LATENT_RESCALE, default False
+     so existing checkpoints keep working) to correct latent/schedule SNR
+     mismatch — see the CONFIG note before flipping it on.
+  F. Removed unused INR_EPOCHS; the CRS fallback is now a single named
+     constant instead of a hardcoded literal in two places.
 """
 
 import os, math
@@ -48,13 +63,17 @@ DEPTH_GRID  = "/kaggle/input/datasets/your-username/helllooo/neww.asc"
 KML_PATH    = "/kaggle/input/datasets/your-username/newhzs/Untitled KML file.kml"
 OUT_ASC     = "Sri25_jax_tpu.asc"
 
+# FIX F: single named fallback CRS instead of a hardcoded literal repeated
+# in two places. ⚠️ verify this actually matches your survey's UTM zone —
+# this is an assumption, not a detected value.
+FALLBACK_CRS = "EPSG:32644"
+
 DIFFUSION_SIZE = 512
 LOAD_CHECKPOINTS = True  #  Enabled checkpoint loading
 VAE_CKPT  = "vae_jax_tpu.bin"
 UNET_CKPT = "unet_jax_tpu.bin"
 
 BATCH_SIZE  = 8
-INR_EPOCHS  = 800
 VAE_EPOCHS  = 3000
 UNET_EPOCHS = 3000
 
@@ -75,6 +94,17 @@ print(f"   BATCH_SIZE={BATCH_SIZE}  ({BATCH_PER_DEVICE} per core × {NUM_DEVICES
 USE_BF16 = True
 CDTYPE = jnp.bfloat16 if USE_BF16 else jnp.float32
 print(f"   compute dtype: {CDTYPE}")
+
+# FIX E: optional Stable-Diffusion-style latent rescaling. The VAE's KL
+# weight is tiny (1e-5), so latents are NOT pulled toward unit variance —
+# but the noise schedule (ALPHA_BAR below) assumes roughly unit-variance
+# inputs. Rescaling latents by 1/std corrects that SNR mismatch and can
+# stabilize/accelerate UNet training.
+# ⚠️ This changes what the UNet sees at every timestep. It is NOT
+# compatible with an existing UNET_CKPT trained with this flag off —
+# delete/retrain UNET_CKPT if you flip this to True. Left False by default
+# so this revision reproduces your existing checkpoint's behavior exactly.
+USE_LATENT_RESCALE = False
 
 # Noise schedule — precomputed once, shared everywhere.
 # Kept as plain NumPy too (host-side) so the DDIM sampling loop can index
@@ -124,8 +154,8 @@ gdf = gpd.read_file(KML_PATH, driver='KML')
 
 asc_crs = asc_meta.get('crs')
 if not asc_crs:
-    print("⚠️ ASC has no CRS in metadata. Assuming EPSG:32644 for KML reprojection.")
-    asc_crs = "EPSG:32644"
+    print(f"⚠️ ASC has no CRS in metadata. Assuming {FALLBACK_CRS} for KML reprojection.")
+    asc_crs = FALLBACK_CRS
 
 gdf = gdf.to_crs(asc_crs)
 
@@ -259,6 +289,9 @@ class DeepVAE(nn.Module):
     def __call__(self, x, rng):
         mu, logvar = self.encoder(x)
         mu, logvar = mu.astype(jnp.float32), logvar.astype(jnp.float32)
+        # FIX D: clamp logvar before exp() — unclamped logvar can blow up
+        # numerically if training runs longer or the LR is increased.
+        logvar = jnp.clip(logvar, -10.0, 10.0)
         z = mu + jnp.exp(0.5 * logvar) * random.normal(rng, mu.shape)
         return self.decoder(z.astype(self.dtype)), mu, logvar
     def encode(self, x):
@@ -447,7 +480,9 @@ else:
             new_state = state.apply_gradients(grads=grads)
             return (new_state, key), (loss, l_r)
         (state, key), (losses, l_rs) = lax.scan(body, (state, key), None, length=CHUNK)
-        return state, key, losses[-1], l_rs[-1]
+        # FIX B: report the mean over the chunk, not just the final (single,
+        # noisy) scan step — losses[-1] was one random draw, not a trend.
+        return state, key, losses.mean(), l_rs.mean()
 
     vae_chunk_p = jax.pmap(vae_chunk, axis_name='cores', donate_argnums=(0,))
 
@@ -470,8 +505,15 @@ def vae_encode(params, x):
     return mu
 
 true_latent = vae_encode(vae_state.params, target_img)
-latent_batch = jnp.repeat(true_latent, BATCH_SIZE, axis=0)
-latent_batch_sharded = latent_batch.reshape(NUM_DEVICES, BATCH_PER_DEVICE, *true_latent.shape[1:])
+
+# FIX E: optional latent rescale — see USE_LATENT_RESCALE note in CONFIG.
+# When False (default), LATENT_SCALE == 1.0 and behavior is unchanged.
+LATENT_SCALE = float(1.0 / (jnp.std(true_latent) + 1e-6)) if USE_LATENT_RESCALE else 1.0
+print(f"  📏 latent std={float(jnp.std(true_latent)):.4f}  LATENT_SCALE={LATENT_SCALE:.4f}")
+true_latent_scaled = true_latent * LATENT_SCALE
+
+latent_batch = jnp.repeat(true_latent_scaled, BATCH_SIZE, axis=0)
+latent_batch_sharded = latent_batch.reshape(NUM_DEVICES, BATCH_PER_DEVICE, *true_latent_scaled.shape[1:])
 
 # ── FIXED SHARDING CONFLICT ───────────────────────────────────────────
 # Pulling to host NumPy strips single-device commitment from vae_encode.
@@ -487,7 +529,7 @@ print(f"  📦 Latent batch shape: {latent_batch.shape} → sharded {latent_batc
 key, sk = random.split(key)
 unet_model  = LatentUNet(latent_ch=4, dtype=CDTYPE)
 dummy_t     = jnp.zeros((1,), dtype=jnp.int32)
-dummy_unet_input = jnp.concatenate([true_latent, true_latent], axis=-1)
+dummy_unet_input = jnp.concatenate([true_latent_scaled, true_latent_scaled], axis=-1)
 unet_vars   = unet_model.init(sk, dummy_unet_input, dummy_t)
 unet_params = unet_vars['params']
 
@@ -521,7 +563,8 @@ else:
             new_state = state.apply_gradients(grads=grads)
             return (new_state, key), loss
         (state, key), losses = lax.scan(body, (state, key), None, length=CHUNK)
-        return state, key, losses[-1]
+        # FIX B: mean over the chunk instead of a single noisy last-step sample.
+        return state, key, losses.mean()
 
     unet_chunk_p = jax.pmap(unet_chunk, axis_name='cores', donate_argnums=(0,))
 
@@ -558,16 +601,16 @@ latent_mask = latent_mask[None, :, :, None]
 
 t_start = int(step_indices[start_idx])
 key, sk = random.split(key)
-noise   = random.normal(sk, true_latent.shape)
+noise   = random.normal(sk, true_latent_scaled.shape)
 a_s     = float(_alpha_bar[t_start])          # host-side lookup, no device sync
-sample  = math.sqrt(a_s) * true_latent + math.sqrt(1 - a_s) * noise
+sample  = math.sqrt(a_s) * true_latent_scaled + math.sqrt(1 - a_s) * noise
 
 for i in range(start_idx, INFERENCE_STEPS):
     t      = int(step_indices[i])
     t_prev = int(step_indices[i + 1]) if i + 1 < INFERENCE_STEPS else -1
     ts     = jnp.array([t], dtype=jnp.int32)
 
-    unet_input = jnp.concatenate([sample, true_latent], axis=-1)
+    unet_input = jnp.concatenate([sample, true_latent_scaled], axis=-1)
     pred_noise = unet_infer(unet_state.params, unet_input, ts)
 
     a_t    = float(_alpha_bar[t])              # host-side, free
@@ -583,23 +626,29 @@ for i in range(start_idx, INFERENCE_STEPS):
 def vae_decode(params, z):
     return vae_model.apply({'params': params}, z, method=vae_model.decode)
 
-generated = np.array(vae_decode(vae_state.params, sample)).squeeze()
+# FIX E: undo the latent rescale (a no-op when USE_LATENT_RESCALE is False)
+# before decoding back into depth space.
+generated = np.array(vae_decode(vae_state.params, sample / LATENT_SCALE)).squeeze()
 print("  ✅ Sampling complete!")
 
 # ═══════════════════════════════════════════════════════════════════════
-# ── 7. EXPORT & REPORT (unchanged) ──────────────────────────────────────
+# ── 7. EXPORT & REPORT ──────────────────────────────────────────────────
 # ═══════════════════════════════════════════════════════════════════════
 generated_depth = (generated + 1.0) * (max_depth / 2.0)
 unpadded        = generated_depth[top:top+H_orig, left:left+W_orig]
-final_depth     = np.where(land_mask > 0, cv2.GaussianBlur(unpadded, (5,5), sigmaX=1.5), 0.0)
-final_depth     = np.clip(final_depth, 0.0, None)
 
-if not asc_meta.get("crs"):
-    asc_meta["crs"] = "EPSG:32644"
-asc_meta.update(driver='AAIGrid', dtype=rasterio.float32, nodata=-9999.0)
-
-with rasterio.open(OUT_ASC, "w", **asc_meta) as dst:
-    dst.write(np.where(final_depth == 0.0, -9999.0, -final_depth).astype(np.float32), 1)
+# FIX C: mask-normalized blur. A plain cv2.GaussianBlur(unpadded, ...) blurs
+# over the WHOLE array (including unmasked decoder content outside the
+# water boundary) and only masks afterward, so shoreline pixels can pick up
+# leakage from outside the mask. Normalizing by a blurred copy of the mask
+# itself keeps the blur confined to genuine in-mask content.
+mask_f      = (land_mask > 0).astype(np.float32)
+blurred_num = cv2.GaussianBlur(unpadded * mask_f, (5, 5), sigmaX=1.5)
+blurred_den = cv2.GaussianBlur(mask_f, (5, 5), sigmaX=1.5)
+blurred     = np.divide(blurred_num, blurred_den,
+                         out=np.zeros_like(blurred_num), where=blurred_den > 1e-6)
+final_depth = np.where(land_mask > 0, blurred, 0.0)
+final_depth = np.clip(final_depth, 0.0, None)
 
 cell_w       = abs(asc_meta['transform'][0])
 cell_h       = abs(asc_meta['transform'][4])
@@ -619,6 +668,17 @@ else:
 cal_depth    = final_depth * cal_fac
 water_pixels = cal_depth[cal_depth > 0]
 vol_m3       = float(np.sum(water_pixels * cell_area_m2))
+
+# FIX A: export the CALIBRATED grid. Previously this block ran BEFORE
+# cal_fac/cal_depth were computed and wrote `final_depth` (pre-calibration),
+# so the saved .asc silently disagreed with the reported volume below by
+# the calibration factor (~15-20% in typical runs).
+if not asc_meta.get("crs"):
+    asc_meta["crs"] = FALLBACK_CRS
+asc_meta.update(driver='AAIGrid', dtype=rasterio.float32, nodata=-9999.0)
+
+with rasterio.open(OUT_ASC, "w", **asc_meta) as dst:
+    dst.write(np.where(cal_depth == 0.0, -9999.0, -cal_depth).astype(np.float32), 1)
 
 print(f"\n{'='*50}")
 print(f"📊 CALIBRATED RESERVOIR STATISTICS")
