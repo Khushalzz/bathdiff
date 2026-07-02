@@ -1,0 +1,49 @@
+# ──────────────────────────────────────────────────────────────────────────
+# Default BathDiff configuration.
+#
+# Usage:
+#   python scripts/run_bathymetry.py --config configs/default.yaml
+#
+# Any CLI flag overrides the corresponding value here.
+# ──────────────────────────────────────────────────────────────────────────
+
+# I/O — UPDATE THESE TO POINT AT YOUR DATA
+asc_path:       data/sample_asc/input.asc
+boundary_path:  data/sample_kml/boundary.kml
+output_path:    outputs/output.asc
+# stats_path:    null     # defaults to <output>_stats.json
+# preview_path:  null     # defaults to <output>_preview.png
+
+# Water body
+body_type: auto            # reservoir | lake | pond | lagoon | canal | river | auto
+crs:       auto            # auto | EPSG:XXXX
+
+# Grid
+diffusion_size: 512        # must be divisible by 8
+
+# Training
+load_checkpoints: false
+vae_ckpt:  checkpoints/vae.bin
+unet_ckpt: checkpoints/unet.bin
+batch_size:   8
+vae_epochs:   3000
+unet_epochs:  3000
+vae_lr:       5.0e-4
+unet_lr:      3.0e-4
+unet_weight_decay: 1.0e-4
+
+# Diffusion
+t_steps:         1000
+inference_steps: 100
+strength:        0.45
+seed:            42
+beta_start:      1.0e-4
+beta_end:        0.02
+
+# Depth handling
+depth_sign: auto           # auto | negative_down | positive_down
+# nodata:    null           # null = read from raster metadata
+
+# Misc
+save_plots: false
+verbose:    false

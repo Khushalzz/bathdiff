@@ -1,0 +1,23 @@
+# Core numerics & image
+numpy>=1.24
+opencv-python>=4.8
+scipy>=1.10
+matplotlib>=3.7
+
+# Geospatial
+rasterio>=1.3
+geopandas>=0.14
+fiona>=1.9
+shapely>=2.0
+
+# Deep learning
+jax>=0.4.20
+flax>=0.7.5
+optax>=0.1.7
+
+# Config & CLI
+pyyaml>=6.0
+typer>=0.9   # optional, for richer CLI
+
+# Testing
+pytest>=7.4

@@ -1,0 +1,80 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bathdiff"
+version = "0.1.0"
+description = "AI-Driven Bathymetric Interpolation for Shallow Water Bodies using Latent Diffusion Models"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+authors = [{ name = "Your Name", email = "you@example.com" }]
+keywords = [
+    "bathymetry",
+    "diffusion-model",
+    "jax",
+    "flax",
+    "geospatial",
+    "reservoir",
+    "hydrology",
+    "deep-learning",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: GIS",
+    "Topic :: Scientific/Engineering :: Hydrology",
+]
+dependencies = [
+    "numpy>=1.24",
+    "opencv-python>=4.8",
+    "scipy>=1.10",
+    "matplotlib>=3.7",
+    "rasterio>=1.3",
+    "geopandas>=0.14",
+    "fiona>=1.9",
+    "shapely>=2.0",
+    "jax>=0.4.20",
+    "flax>=0.7.5",
+    "optax>=0.1.7",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.4", "pytest-cov", "ruff", "black", "mypy"]
+
+[project.urls]
+Homepage = "https://github.com/<your-username>/bathymetric-diffusion"
+Repository = "https://github.com/<your-username>/bathymetric-diffusion"
+Issues = "https://github.com/<your-username>/bathymetric-diffusion/issues"
+
+[project.scripts]
+bathdiff = "bathdiff.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+bathdiff = ["py.typed"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.black]
+line-length = 100
+target-version = ["py310"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+]
